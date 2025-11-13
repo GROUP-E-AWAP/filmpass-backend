@@ -42,6 +42,10 @@ app.get("/db-health", async (req, res) => {
   }
 });
 
+app.get("/", (req, res) => {
+  res.send("Welcome to the Movie Theater Booking API" );
+});
+
 /* Movies list */
 app.get("/movies", async (_req, res) => {
   try {
