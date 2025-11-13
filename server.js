@@ -1,138 +1,146 @@
 import express from "express";
 import cors from "cors";
-import { getDb } from "./db.js";
-import crypto from "crypto";
+import dotenv from "dotenv";
+import pkg from "pg";
+
+dotenv.config();
+
+const { Pool } = pkg;
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false }
+});
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-const db = getDb();
-
-function uid(prefix) {
-  return `${prefix}-${crypto.randomBytes(6).toString("hex")}`;
-}
-
+/* Health */
 app.get("/health", (req, res) => res.json({ ok: true }));
 
-// Movies list
-app.get("/movies", (req, res) => {
-  db.all(
-    "SELECT id, title, description, duration_minutes, poster_url FROM movies ORDER BY title",
-    (err, rows) => {
-      if (err) return res.status(500).json({ error: String(err) });
-      res.json(rows);
-    }
-  );
+app.get("/db-health", async (req, res) => {
+  try {
+    const r = await pool.query("SELECT 1 AS ok");
+    res.json({ ok: r.rows[0].ok === 1 });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
+  }
 });
 
-// Movie details with showtimes
-app.get("/movies/:id", (req, res) => {
-  const id = req.params.id;
-  db.get("SELECT * FROM movies WHERE id = ?", [id], (err, movie) => {
-    if (err) return res.status(500).json({ error: String(err) });
-    if (!movie) return res.status(404).json({ error: "Not found" });
-    db.all(
-      "SELECT * FROM showtimes WHERE movie_id = ? ORDER BY start_time",
-      [id],
-      (e2, shows) => {
-        if (e2) return res.status(500).json({ error: String(e2) });
-        res.json({ movie, showtimes: shows });
-      }
-    );
-  });
+/* Movies list */
+app.get("/movies", async (_req, res) => {
+  try {
+    const q = `
+      SELECT movie_id AS id, title, description, duration_minutes, release_date
+      FROM movie
+      ORDER BY title
+    `;
+    const r = await pool.query(q);
+    res.json(r.rows);
+  } catch (e) {
+    res.status(500).json({ error: String(e) });
+  }
 });
 
-// Seats availability for a showtime
-app.get("/showtimes/:id/seats", (req, res) => {
-  const showId = req.params.id;
-  const sql = `
-    SELECT s.id, s.row_label, s.seat_number,
-           CASE WHEN EXISTS (
-             SELECT 1 FROM booking_seats bs
-             JOIN bookings b ON b.id = bs.booking_id
-             WHERE bs.seat_id = s.id AND b.showtime_id = ? AND b.status = 'CONFIRMED'
-           ) THEN 'BOOKED' ELSE 'AVAILABLE' END AS status
-    FROM seats s
-    WHERE s.auditorium_id = (SELECT auditorium_id FROM showtimes WHERE id = ?)
-    ORDER BY s.row_label, s.seat_number
-  `;
-  db.all(sql, [showId, showId], (err, rows) => {
-    if (err) return res.status(500).json({ error: String(err) });
-    res.json(rows);
-  });
+/* Movie details + soonest showtimes (join theater) */
+app.get("/movies/:id", async (req, res) => {
+  const id = Number(req.params.id);
+  try {
+    const m = await pool.query(`
+      SELECT movie_id AS id, title, description, duration_minutes, release_date, genre
+      FROM movie WHERE movie_id = $1
+    `, [id]);
+    if (m.rows.length === 0) return res.status(404).json({ error: "Not found" });
+
+    const s = await pool.query(`
+      SELECT s.showtime_id AS id,
+             s.show_date,
+             s.start_time,
+             s.end_time,
+             s.price,
+             t.theater_id,
+             t.name AS theater_name,
+             t.location AS theater_location
+      FROM showtime s
+      JOIN theater t ON t.theater_id = s.theater_id
+      WHERE s.movie_id = $1
+      ORDER BY s.show_date, s.start_time
+    `, [id]);
+
+    res.json({ movie: m.rows[0], showtimes: s.rows });
+  } catch (e) {
+    res.status(500).json({ error: String(e) });
+  }
 });
 
-// Create booking (simple, atomically via transaction)
-app.post("/bookings", (req, res) => {
-  const { showtimeId, customerEmail, seats, ticketType } = req.body;
-  if (!showtimeId || !customerEmail || !Array.isArray(seats) || seats.length === 0) {
+/* Create booking */
+app.post("/bookings", async (req, res) => {
+  const { userEmail, userName, showtimeId, seats } = req.body;
+  if (!userEmail || !showtimeId || !seats || seats <= 0) {
     return res.status(400).json({ error: "Invalid payload" });
   }
-  db.serialize(() => {
-    db.run("BEGIN");
-    db.get("SELECT price_adult, price_child FROM showtimes WHERE id = ?", [showtimeId], (e0, p) => {
-      if (e0 || !p) {
-        db.run("ROLLBACK");
-        return res.status(400).json({ error: "Invalid showtime" });
-      }
-      const price = ticketType === "child" ? p.price_child : p.price_adult;
-      const bookingId = uid("bk");
-      const createdAt = new Date().toISOString();
-      const total = price * seats.length;
 
-      // Check availability
-      const placeholders = seats.map(() => "?").join(",");
-      const checkSql = `
-        SELECT s.id
-        FROM seats s
-        WHERE s.id IN (${placeholders})
-        AND EXISTS (
-          SELECT 1 FROM booking_seats bs
-          JOIN bookings b ON b.id = bs.booking_id
-          WHERE bs.seat_id = s.id AND b.showtime_id = ? AND b.status = 'CONFIRMED'
-        )
-      `;
-      db.all(checkSql, [...seats, showtimeId], (e1, conflicts) => {
-        if (e1) {
-          db.run("ROLLBACK");
-          return res.status(500).json({ error: String(e1) });
-        }
-        if (conflicts.length > 0) {
-          db.run("ROLLBACK");
-          return res.status(409).json({ error: "Seat already booked", conflicts });
-        }
-        // Insert booking
-        db.run(
-          "INSERT INTO bookings (id, showtime_id, customer_email, total_amount, status, created_at) VALUES (?, ?, ?, ?, 'CONFIRMED', ?)",
-          [bookingId, showtimeId, customerEmail, total, createdAt],
-          e2 => {
-            if (e2) {
-              db.run("ROLLBACK");
-              return res.status(500).json({ error: String(e2) });
-            }
-            // Insert seats
-            const stmt = db.prepare("INSERT INTO booking_seats (id, booking_id, seat_id, price) VALUES (?, ?, ?, ?)");
-            for (const seatId of seats) {
-              stmt.run(uid("bks"), bookingId, seatId, price);
-            }
-            stmt.finalize(errF => {
-              if (errF) {
-                db.run("ROLLBACK");
-                return res.status(500).json({ error: String(errF) });
-              }
-              db.run("COMMIT");
-              return res.status(201).json({ bookingId, total });
-            });
-          }
-        );
-      });
-    });
-  });
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+
+    // 1) find or create user
+    // password  NOT NULL, so we add 'guest'
+    const uSel = await client.query(`SELECT user_id FROM public."user" WHERE email = $1 LIMIT 1`, [userEmail]);
+    let userId;
+    if (uSel.rows.length) {
+      userId = uSel.rows[0].user_id;
+    } else {
+      const ins = await client.query(
+        `INSERT INTO public."user"(name, email, password, role) VALUES ($1, $2, 'guest', 'customer') RETURNING user_id`,
+        [userName || userEmail.split("@")[0], userEmail]
+      );
+      userId = ins.rows[0].user_id;
+    }
+
+    // 2) price
+    const pr = await client.query(`SELECT price FROM showtime WHERE showtime_id = $1`, [showtimeId]);
+    if (pr.rows.length === 0) {
+      await client.query("ROLLBACK");
+      return res.status(400).json({ error: "Invalid showtime" });
+    }
+    const price = Number(pr.rows[0].price || 0);
+    const total = price * Number(seats);
+
+    // 3) create booking
+    const b = await client.query(
+      `INSERT INTO booking (user_id, showtime_id, seats, total_amount, status)
+       VALUES ($1, $2, $3, $4, 'confirmed')
+       RETURNING booking_id`,
+      [userId, showtimeId, seats, total]
+    );
+
+    await client.query("COMMIT");
+    res.status(201).json({ bookingId: b.rows[0].booking_id, total });
+  } catch (e) {
+    await client.query("ROLLBACK");
+    res.status(500).json({ error: String(e) });
+  } finally {
+    client.release();
+  }
 });
 
-const PORT = 8080;
+/* Endpoint for later */
+app.get("/showtimes/:id", async (req, res) => {
+  const id = Number(req.params.id);
+  try {
+    const r = await pool.query(`
+      SELECT showtime_id AS id, movie_id, theater_id, show_date, start_time, end_time, price
+      FROM showtime WHERE movie_id = $1
+      ORDER BY show_date, start_time
+    `, [id]);
+    res.json(r.rows);
+  } catch (e) {
+    res.status(500).json({ error: String(e) });
+  }
+});
+
+const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
   console.log(`API listening on http://localhost:${PORT}`);
-  console.log(`Health: http://localhost:${PORT}/health`);
 });
