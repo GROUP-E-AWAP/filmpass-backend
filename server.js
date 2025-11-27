@@ -92,6 +92,42 @@ app.get("/movies/:id", async (req, res) => {
   }
 });
 
+// Create a new movie
+app.post('/movies', async (req, res) => {
+  try {
+    const { title, description, duration_minutes, poster_url } = req.body;
+
+    // Basic validation
+    if (!title || !duration_minutes) {
+      return res.status(400).json({ error: "Title and duration_minutes are required" });
+    }
+
+    const result = await pool.query(
+      `INSERT INTO movie (title, description, duration_minutes, poster_url) 
+       VALUES ($1, $2, $3, $4) 
+       RETURNING *`,
+      [title, description, duration_minutes, poster_url]
+    );
+
+    res.status(201).json(result.rows[0]);
+  } catch (err) {
+    console.error("Error creating movie:", err);
+    res.status(500).json({ error: "Internal Server Error"});
+  }
+});
+
+// Delete a movie (also used by the Admin page)
+app.delete('/movies/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    await pool.query('DELETE FROM movie WHERE movie_id = $1', [id]);
+    res.json({ message: "Movie deleted successfully" });
+  } catch (err) {
+    console.error("Error deleting movie:", err);
+    res.status(500).json({ error: "Internal Server Error"});
+  }
+});
+
 /* Create booking */
 app.post("/bookings", async (req, res) => {
   const { userEmail, userName, showtimeId, seats } = req.body;
