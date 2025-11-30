@@ -50,8 +50,8 @@ app.get("/", (req, res) => {
 app.get("/movies", async (_req, res) => {
   try {
     const q = `
-      SELECT id, title, description, duration_minutes, poster_url, price
-      FROM movies
+      SELECT movie_id AS id, title, description, duration_minutes, release_date
+      FROM movie
       ORDER BY title
     `;
     const r = await pool.query(q);
@@ -61,28 +61,29 @@ app.get("/movies", async (_req, res) => {
   }
 });
 
-/* Movie details + soonest showtimes (join auditorium) */
+/* Movie details + soonest showtimes (join theater) */
 app.get("/movies/:id", async (req, res) => {
-  const id = req.params.id;
+  const id = Number(req.params.id);
   try {
     const m = await pool.query(`
-      SELECT id, title, description, duration_minutes, poster_url, price
-      FROM movies WHERE id = $1
+      SELECT movie_id AS id, title, description, duration_minutes, release_date, genre
+      FROM movie WHERE movie_id = $1
     `, [id]);
     if (m.rows.length === 0) return res.status(404).json({ error: "Not found" });
 
     const s = await pool.query(`
-      SELECT s.id,
+      SELECT s.showtime_id AS id,
+             s.show_date,
              s.start_time,
              s.end_time,
-             s.price_adult,
-             s.price_child,
-             a.id AS auditorium_id,
-             a.name AS auditorium_name
-      FROM showtimes s
-      JOIN auditoriums a ON a.id = s.auditorium_id
+             s.price,
+             t.theater_id,
+             t.name AS theater_name,
+             t.location AS theater_location
+      FROM showtime s
+      JOIN theater t ON t.theater_id = s.theater_id
       WHERE s.movie_id = $1
-      ORDER BY s.start_time
+      ORDER BY s.show_date, s.start_time
     `, [id]);
 
     res.json({ movie: m.rows[0], showtimes: s.rows });
@@ -94,18 +95,18 @@ app.get("/movies/:id", async (req, res) => {
 // Create a new movie
 app.post('/movies', async (req, res) => {
   try {
-    const { id, title, description, duration_minutes, poster_url } = req.body;
+    const { title, description, duration_minutes, poster_url } = req.body;
 
     // Basic validation
-    if (!id || !title || !duration_minutes) {
-      return res.status(400).json({ error: "ID, title and duration_minutes are required" });
+    if (!title || !duration_minutes) {
+      return res.status(400).json({ error: "Title and duration_minutes are required" });
     }
 
     const result = await pool.query(
-      `INSERT INTO movies (id, title, description, duration_minutes, poster_url) 
-       VALUES ($1, $2, $3, $4, $5) 
+      `INSERT INTO movie (title, description, duration_minutes, poster_url) 
+       VALUES ($1, $2, $3, $4) 
        RETURNING *`,
-      [id, title, description, duration_minutes, poster_url]
+      [title, description, duration_minutes, poster_url]
     );
 
     res.status(201).json(result.rows[0]);
@@ -119,7 +120,7 @@ app.post('/movies', async (req, res) => {
 app.delete('/movies/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    await pool.query('DELETE FROM movies WHERE id = $1', [id]);
+    await pool.query('DELETE FROM movie WHERE movie_id = $1', [id]);
     res.json({ message: "Movie deleted successfully" });
   } catch (err) {
     console.error("Error deleting movie:", err);
@@ -152,13 +153,13 @@ app.post("/bookings", async (req, res) => {
       userId = ins.rows[0].user_id;
     }
 
-    // 2) price (using adult price)
-    const pr = await client.query(`SELECT price_adult FROM showtimes WHERE id = $1`, [showtimeId]);
+    // 2) price
+    const pr = await client.query(`SELECT price FROM showtime WHERE showtime_id = $1`, [showtimeId]);
     if (pr.rows.length === 0) {
       await client.query("ROLLBACK");
       return res.status(400).json({ error: "Invalid showtime" });
     }
-    const price = Number(pr.rows[0].price_adult || 0);
+    const price = Number(pr.rows[0].price || 0);
     const total = price * Number(seats);
 
     // 3) create booking
@@ -181,12 +182,12 @@ app.post("/bookings", async (req, res) => {
 
 /* Endpoint for later */
 app.get("/showtimes/:id", async (req, res) => {
-  const id = req.params.id;
+  const id = Number(req.params.id);
   try {
     const r = await pool.query(`
-      SELECT id, movie_id, auditorium_id, start_time, end_time, price_adult, price_child
-      FROM showtimes WHERE movie_id = $1
-      ORDER BY start_time
+      SELECT showtime_id AS id, movie_id, theater_id, show_date, start_time, end_time, price
+      FROM showtime WHERE movie_id = $1
+      ORDER BY show_date, start_time
     `, [id]);
     res.json(r.rows);
   } catch (e) {
