@@ -1,8 +1,11 @@
 import { JWT_SECRET } from "./config/env.js";
 import { createApp } from "./app.js";
 import { pool } from "./config/db.js";
+import express from "express";
+import cors from "cors";
+import Stripe from "stripe";
 
-const PORT = process.env.PORT || 8080;
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 const app = createApp();
 
 /**
@@ -11,16 +14,6 @@ const app = createApp();
  *  - Confirm JWT secret presence
  *  - Run a simple DB health check query
  */
-app.listen(PORT, () => {
-  console.log("DB config:", {
-    host: process.env.DB_HOST,
-    db: process.env.DB_NAME,
-    user: process.env.DB_USER,
-    ssl: process.env.DB_SSL
-  });
-
-
-const app = express();
 app.use(cors());
 app.use(express.json());
 
@@ -474,6 +467,7 @@ app.use((req, res, next) => {
 });
 
 const PORT = process.env.PORT || 8080;
+
 app.listen(PORT, () => {
   console.log(`API listening on http://localhost:${PORT}`);
   console.log("JWT secret loaded:", process.env.JWT_SECRET ? "OK" : "MISSING");
