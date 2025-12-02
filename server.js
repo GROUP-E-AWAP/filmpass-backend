@@ -1,33 +1,23 @@
-import express from "express";
-import cors from "cors";
-import dotenv from "dotenv";
-import pkg from "pg";
-import Stripe from "stripe";
+import { JWT_SECRET } from "./config/env.js";
+import { createApp } from "./app.js";
+import { pool } from "./config/db.js";
 
-dotenv.config();
+const PORT = process.env.PORT || 8080;
+const app = createApp();
 
-const { Pool } = pkg;
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
-  apiVersion: '2025-03-31.basil',
-});
-
-const pool = new Pool({
-  host: process.env.DB_HOST,
-  port: Number(process.env.DB_PORT) || 5432,
-  database: process.env.DB_NAME,
-  user: process.env.DB_USER,
-  password: process.env.DB_PASSWORD,
-  ssl: process.env.DB_SSL === "true" ? { rejectUnauthorized: false } : false
-});
-
-// для контроля, без пароля
-console.log("DB config:", {
-  host: process.env.DB_HOST,
-  port: process.env.DB_PORT,
-  database: process.env.DB_NAME,
-  user: process.env.DB_USER,
-  ssl: process.env.DB_SSL
-});
+/**
+ * Start HTTP server and perform basic startup diagnostics:
+ *  - Print DB config (safe subset)
+ *  - Confirm JWT secret presence
+ *  - Run a simple DB health check query
+ */
+app.listen(PORT, () => {
+  console.log("DB config:", {
+    host: process.env.DB_HOST,
+    db: process.env.DB_NAME,
+    user: process.env.DB_USER,
+    ssl: process.env.DB_SSL
+  });
 
 
 const app = express();
@@ -486,4 +476,16 @@ app.use((req, res, next) => {
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
   console.log(`API listening on http://localhost:${PORT}`);
+  console.log("JWT secret loaded:", process.env.JWT_SECRET ? "OK" : "MISSING");
+
+  // Simple database connectivity test
+  pool
+    .query("SELECT 1 AS ok")
+    .then(r => {
+      const row = r.rows[0];
+      console.log("DB health check ok:", row);
+    })
+    .catch(err => {
+      console.error("DB health check failed:", err.message);
+    });
 });
