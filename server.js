@@ -6,12 +6,14 @@ import cors from "cors";
 import Stripe from "stripe";
 
 // Initialize Stripe with proper error handling
+let stripe = null;
 if (!process.env.STRIPE_SECRET_KEY) {
-  console.error("ERROR: STRIPE_SECRET_KEY not found in environment variables");
-  process.exit(1);
+  console.warn("WARNING: STRIPE_SECRET_KEY not found in environment variables");
+  console.warn("Payment features will be disabled. Add STRIPE_SECRET_KEY to enable payments.");
+} else {
+  stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+  console.log("Stripe initialized successfully");
 }
-
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 const app = createApp();
 
 /**
@@ -188,8 +190,24 @@ app.get("/showtimes/:id", async (req, res) => {
 
 /* Stripe Payment Integration */
 
+// Helper function to check if Stripe is configured
+const checkStripeConfigured = (res) => {
+  if (!stripe) {
+    res.status(503).json({
+      error: "Payment system not configured",
+      message: "Stripe payment integration is not available.",
+      code: "STRIPE_NOT_CONFIGURED"
+    });
+    return false;
+  }
+  return true;
+};
+
+
 // Create payment intent
 app.post("/create-payment-intent", async (req, res) => {
+  if (!checkStripeConfigured(res)) return;
+
   try {
     const { amount, currency = "usd", bookingDetails } = req.body;
 
@@ -224,6 +242,8 @@ app.post("/api/create-payment-intent", async (req, res) => {
 });
 
 app.post("/payment/create-intent", async (req, res) => {
+  if (!checkStripeConfigured(res)) return;
+
   try {
     const { amount, currency = "usd", bookingDetails } = req.body;
     if (!amount || amount <= 0) {
@@ -248,6 +268,8 @@ app.post("/payment/create-intent", async (req, res) => {
 // Create checkout session (for Stripe Checkout flow)
 // This endpoint returns a Payment Intent for embedded checkout UI
 app.post("/create-checkout-session", async (req, res) => {
+  if (!checkStripeConfigured(res)) return;
+
   try {
     console.log("Received checkout session request:", req.body);
     const { amount, currency = "eur", userEmail, showtimeId, seats, userName } = req.body;
@@ -288,6 +310,8 @@ app.post("/create-checkout-session", async (req, res) => {
 
 // Verify payment status
 app.get("/verify-payment", async (req, res) => {
+  if (!checkStripeConfigured(res)) return;
+
   try {
     let paymentIntentId = req.query.paymentIntentId;
     let sessionId = req.query.session_id;
@@ -527,6 +551,8 @@ app.get("/verify-payment", async (req, res) => {
 
 // Legacy payment status endpoint (kept for backward compatibility)
 app.get("/payment-status/:paymentIntentId", async (req, res) => {
+  if (!checkStripeConfigured(res)) return;
+
   try {
     const paymentIntent = await stripe.paymentIntents.retrieve(
       req.params.paymentIntentId
@@ -545,6 +571,8 @@ app.get("/payment-status/:paymentIntentId", async (req, res) => {
 
 // Webhook endpoint for Stripe events (optional but recommended)
 app.post("/webhook", express.raw({ type: "application/json" }), async (req, res) => {
+  if (!checkStripeConfigured(res)) return;
+
   // Skip webhook verification if webhook secret is not configured
   if (!process.env.STRIPE_WEBHOOK_SECRET) {
     console.log("Webhook received but STRIPE_WEBHOOK_SECRET not configured, skipping verification");
@@ -586,7 +614,8 @@ app.post("/webhook", express.raw({ type: "application/json" }), async (req, res)
 // Get Stripe publishable key (for frontend)
 app.get("/config", (req, res) => {
   res.json({
-    publishableKey: process.env.STRIPE_PUBLISHABLE_KEY,
+    publishableKey: process.env.STRIPE_PUBLISHABLE_KEY || null,
+    stripeEnabled: !!stripe,
   });
 });
 
@@ -614,6 +643,8 @@ app.post("/confirm-payment", async (req, res) => {
 
 // Direct PaymentIntent confirmation endpoint
 app.post("/confirm-payment-intent", async (req, res) => {
+  if (!checkStripeConfigured(res)) return;
+
   try {
     const { paymentIntentId } = req.body;
 
@@ -788,7 +819,7 @@ process.on('unhandledRejection', (reason, promise) => {
 app.listen(PORT, () => {
   console.log(`API listening on http://localhost:${PORT}`);
   console.log("JWT secret loaded:", process.env.JWT_SECRET ? "OK" : "MISSING");
-  console.log("Stripe key loaded:", process.env.STRIPE_SECRET_KEY ? "OK" : "MISSING");
+  console.log("Stripe payment features:", stripe ? "ENABLED" : "DISABLED (no STRIPE_SECRET_KEY)");
 
   // Simple database connectivity test
   pool
