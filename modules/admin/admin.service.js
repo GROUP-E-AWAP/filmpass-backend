@@ -5,6 +5,11 @@ import {
   adminCreateShowtime,
   adminCreateTheater,
   adminCreateUser,
+  adminDeleteAuditorium,
+  adminDeleteEmployee,
+  adminDeleteMovie,
+  adminDeleteShowtime,
+  adminDeleteTheater,
   adminFindUserByEmail,
   adminGenerateSeatsForAuditorium,
   adminLinkEmployeeToTheater,
@@ -32,6 +37,14 @@ export async function adminCreateTheaterService(payload) {
 }
 
 /**
+ * Service: delete a theater by ID.
+ * Cascades to delete auditoriums, showtimes, and seats.
+ */
+export async function adminDeleteTheaterService(theaterId) {
+  return adminDeleteTheater(theaterId);
+}
+
+/**
  * Service: list all auditoriums for a given theater.
  */
 export async function adminListAuditoriumsService(theaterId) {
@@ -56,6 +69,14 @@ export async function adminCreateAuditoriumService(payload) {
 }
 
 /**
+ * Service: delete an auditorium by ID.
+ * Cascades to delete seats and showtimes.
+ */
+export async function adminDeleteAuditoriumService(auditoriumId) {
+  return adminDeleteAuditorium(auditoriumId);
+}
+
+/**
  * Service: list all movies.
  */
 export async function adminListMoviesService() {
@@ -70,10 +91,33 @@ export async function adminCreateMovieService(payload) {
 }
 
 /**
+ * Service: delete a movie by ID.
+ * Cascades to delete showtimes and bookings.
+ */
+export async function adminDeleteMovieService(movieId) {
+  return adminDeleteMovie(movieId);
+}
+
+/**
+ * Service: list all showtimes with details.
+ */
+export async function adminListShowtimesService() {
+  return adminListShowtimes();
+}
+
+/**
  * Service: create a new showtime (movie screening).
  */
 export async function adminCreateShowtimeService(payload) {
   return adminCreateShowtime(payload);
+}
+
+/**
+ * Service: delete a showtime by ID.
+ * Cascades to delete bookings.
+ */
+export async function adminDeleteShowtimeService(showtimeId) {
+  return adminDeleteShowtime(showtimeId);
 }
 
 /**
@@ -110,6 +154,14 @@ export async function adminCreateEmployeeService(payload) {
   await adminLinkEmployeeToTheater(user.user_id, theaterId);
 
   return user;
+}
+
+/**
+ * Service: delete an employee by ID.
+ * Removes theater assignments and the user account.
+ */
+export async function adminDeleteEmployeeService(userId) {
+  return adminDeleteEmployee(userId);
 }
 
 /**

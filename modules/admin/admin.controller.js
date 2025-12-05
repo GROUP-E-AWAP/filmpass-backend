@@ -4,6 +4,11 @@ import {
   adminCreateMovieService,
   adminCreateShowtimeService,
   adminCreateTheaterService,
+  adminDeleteAuditoriumService,
+  adminDeleteEmployeeService,
+  adminDeleteMovieService,
+  adminDeleteShowtimeService,
+  adminDeleteTheaterService,
   adminListAuditoriumsService,
   adminListBookingsService,
   adminListEmployeesService,
@@ -32,6 +37,38 @@ export async function adminCreateTheaterController(req, res, next) {
   try {
     const theater = await adminCreateTheaterService(req.body);
     res.status(201).json(theater);
+  } catch (e) {
+    next(e);
+  }
+}
+
+/**
+ * DELETE /admin/theaters/:theaterId
+ * Deletes a theater and all related data (auditoriums, showtimes, seats).
+ */
+export async function adminDeleteTheaterController(req, res, next) {
+  try {
+    const theaterId = Number(req.params.theaterId);
+
+    if (Number.isNaN(theaterId)) {
+      return res.status(400).json({ error: "Invalid theater id" });
+    }
+
+    const theater = await adminDeleteTheaterService(theaterId);
+    res.json({ message: "Theater deleted successfully", data: theater });
+  } catch (e) {
+    next(e);
+  }
+}
+
+/**
+ * GET /admin/showtimes
+ * Returns all showtimes with movie, theater, and auditorium details.
+ */
+export async function adminListShowtimesController(_req, res, next) {
+  try {
+    const showtimes = await adminListShowtimesService();
+    res.json(showtimes);
   } catch (e) {
     next(e);
   }
@@ -71,6 +108,25 @@ export async function adminCreateAuditoriumController(req, res, next) {
 }
 
 /**
+ * DELETE /admin/auditoriums/:auditoriumId
+ * Deletes an auditorium and all related data (seats, showtimes).
+ */
+export async function adminDeleteAuditoriumController(req, res, next) {
+  try {
+    const auditoriumId = Number(req.params.auditoriumId);
+
+    if (Number.isNaN(auditoriumId)) {
+      return res.status(400).json({ error: "Invalid auditorium id" });
+    }
+
+    const auditorium = await adminDeleteAuditoriumService(auditoriumId);
+    res.json({ message: "Auditorium deleted successfully", data: auditorium });
+  } catch (e) {
+    next(e);
+  }
+}
+
+/**
  * GET /admin/movies
  * Returns a list of all movies available in the system.
  */
@@ -97,6 +153,25 @@ export async function adminCreateMovieController(req, res, next) {
 }
 
 /**
+ * DELETE /admin/movies/:movieId
+ * Deletes a movie and all related data (showtimes, bookings).
+ */
+export async function adminDeleteMovieController(req, res, next) {
+  try {
+    const movieId = Number(req.params.movieId);
+
+    if (Number.isNaN(movieId)) {
+      return res.status(400).json({ error: "Invalid movie id" });
+    }
+
+    const movie = await adminDeleteMovieService(movieId);
+    res.json({ message: "Movie deleted successfully", data: movie });
+  } catch (e) {
+    next(e);
+  }
+}
+
+/**
  * POST /admin/showtimes
  * Creates a showtime (movie + auditorium + time + price).
  */
@@ -110,6 +185,25 @@ export async function adminCreateShowtimeController(req, res, next) {
 }
 
 /**
+ * DELETE /admin/showtimes/:showtimeId
+ * Deletes a showtime and all related bookings.
+ */
+export async function adminDeleteShowtimeController(req, res, next) {
+  try {
+    const showtimeId = Number(req.params.showtimeId);
+
+    if (Number.isNaN(showtimeId)) {
+      return res.status(400).json({ error: "Invalid showtime id" });
+    }
+
+    const showtime = await adminDeleteShowtimeService(showtimeId);
+    res.json({ message: "Showtime deleted successfully", data: showtime });
+  } catch (e) {
+    next(e);
+  }
+}
+
+/**
  * POST /admin/employees
  * Creates a new employee/user (e.g. manager, cashier, admin).
  */
@@ -117,6 +211,25 @@ export async function adminCreateEmployeeController(req, res, next) {
   try {
     const user = await adminCreateEmployeeService(req.body);
     res.status(201).json(user);
+  } catch (e) {
+    next(e);
+  }
+}
+
+/**
+ * DELETE /admin/employees/:employeeId
+ * Deletes an employee and removes theater assignments.
+ */
+export async function adminDeleteEmployeeController(req, res, next) {
+  try {
+    const employeeId = Number(req.params.employeeId);
+
+    if (Number.isNaN(employeeId)) {
+      return res.status(400).json({ error: "Invalid employee id" });
+    }
+
+    const employee = await adminDeleteEmployeeService(employeeId);
+    res.json({ message: "Employee deleted successfully", data: employee });
   } catch (e) {
     next(e);
   }

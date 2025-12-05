@@ -26,6 +26,27 @@ export async function adminCreateTheater({ name, location }) {
 }
 
 /**
+ * Delete a theater by ID.
+ * Also deletes related auditoriums, showtimes, and seats (CASCADE).
+ */
+export async function adminDeleteTheater(theaterId) {
+  const result = await query(
+    `DELETE FROM theater
+     WHERE theater_id = $1
+     RETURNING theater_id AS id, name, location`,
+    [theaterId]
+  );
+  
+  if (result.rows.length === 0) {
+    const err = new Error("Theater not found");
+    err.statusCode = 404;
+    throw err;
+  }
+  
+  return result.rows[0];
+}
+
+/**
  * Returns all auditoriums belonging to a given theater.
  */
 export async function adminListAuditoriums(theaterId) {
@@ -53,6 +74,27 @@ export async function adminCreateAuditorium({ theaterId, name, seatRows, seatCol
      RETURNING auditorium_id AS id, theater_id, name, seat_rows, seat_cols`,
     [theaterId, name, seatRows, seatCols]
   );
+  return result.rows[0];
+}
+
+/**
+ * Delete an auditorium by ID.
+ * Deletes related seats and showtimes (CASCADE).
+ */
+export async function adminDeleteAuditorium(auditoriumId) {
+  const result = await query(
+    `DELETE FROM auditorium
+     WHERE auditorium_id = $1
+     RETURNING auditorium_id AS id, theater_id, name, seat_rows, seat_cols`,
+    [auditoriumId]
+  );
+  
+  if (result.rows.length === 0) {
+    const err = new Error("Auditorium not found");
+    err.statusCode = 404;
+    throw err;
+  }
+  
   return result.rows[0];
 }
 
@@ -133,6 +175,33 @@ export async function adminCreateMovie({
 }
 
 /**
+ * Delete a movie by ID.
+ * Also deletes related showtimes and bookings (CASCADE).
+ */
+export async function adminDeleteMovie(movieId) {
+  const result = await query(
+    `DELETE FROM movie
+     WHERE movie_id = $1
+     RETURNING movie_id AS id,
+               title,
+               genre,
+               duration_minutes,
+               release_date,
+               description,
+               poster_url`,
+    [movieId]
+  );
+  
+  if (result.rows.length === 0) {
+    const err = new Error("Movie not found");
+    err.statusCode = 404;
+    throw err;
+  }
+  
+  return result.rows[0];
+}
+
+/**
  * Create a showtime (movie screening event).
  * start_time and end_time are constructed by merging date + time.
  */
@@ -166,6 +235,62 @@ export async function adminCreateShowtime({
                price`,
     [movieId, theaterId, auditoriumId, showDate, startTime, endTime, price]
   );
+  return result.rows[0];
+}
+
+/**
+ * Delete a showtime by ID.
+ * Also deletes related bookings (CASCADE).
+ */
+export async function adminDeleteShowtime(showtimeId) {
+  const result = await query(
+    `DELETE FROM showtime
+     WHERE showtime_id = $1
+     RETURNING showtime_id AS id,
+               movie_id,
+               theater_id,
+               auditorium_id,
+               show_date,
+               start_time,
+               end_time,
+               price`,
+    [showtimeId]
+  );
+  
+  if (result.rows.length === 0) {
+    const err = new Error("Showtime not found");
+    err.statusCode = 404;
+    throw err;
+  }
+  
+  return result.rows[0];
+}
+
+/**
+ * Delete an employee (user) by ID.
+ * Also removes theater assignments.
+ */
+export async function adminDeleteEmployee(userId) {
+  // First remove theater assignments
+  await query(
+    `DELETE FROM employee_theater WHERE user_id = $1`,
+    [userId]
+  );
+  
+  // Then delete the user
+  const result = await query(
+    `DELETE FROM public."user"
+     WHERE user_id = $1 AND role IN ('employee', 'admin')
+     RETURNING user_id AS id, name, email, role`,
+    [userId]
+  );
+  
+  if (result.rows.length === 0) {
+    const err = new Error("Employee not found");
+    err.statusCode = 404;
+    throw err;
+  }
+  
   return result.rows[0];
 }
 
@@ -230,6 +355,32 @@ export async function adminListEmployees() {
   LEFT JOIN theater t           ON t.theater_id = et.theater_id
       WHERE u.role IN ('employee', 'admin')
       ORDER BY u.user_id`
+  );
+  return result.rows;
+}
+
+/**
+ * Return all showtimes with related data (movie, theater, auditorium).
+ */
+export async function adminListShowtimes() {
+  const result = await query(
+    `SELECT 
+       s.showtime_id AS id,
+       s.show_date,
+       s.start_time,
+       s.end_time,
+       s.price,
+       m.title AS movie_title,
+       m.movie_id AS movie_id,
+       t.name AS theater_name,
+       t.theater_id AS theater_id,
+       a.name AS auditorium_name,
+       a.auditorium_id AS auditorium_id
+     FROM showtime s
+     JOIN movie m ON m.movie_id = s.movie_id
+     JOIN theater t ON t.theater_id = s.theater_id
+     LEFT JOIN auditorium a ON a.auditorium_id = s.auditorium_id
+     ORDER BY s.show_date DESC, s.start_time DESC`
   );
   return result.rows;
 }
