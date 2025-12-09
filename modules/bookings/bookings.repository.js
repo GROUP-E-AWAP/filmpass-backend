@@ -90,6 +90,8 @@ export async function createBookingWithSeats(
 
   const bookingId = bookingResult.rows[0].booking_id;
 
+  console.log(`💾 Creating booking ${bookingId} with ${seats.length} seats:`, seats);
+
   // Insert a row for each reserved seat
   for (const seatId of seats) {
     await client.query(
@@ -97,7 +99,126 @@ export async function createBookingWithSeats(
        VALUES ($1, $2, $3, $4)`,
       [bookingId, seatId, ticketType, price]
     );
+    console.log(`  ✓ Saved seat ${seatId} for booking ${bookingId}`);
   }
 
   return bookingId;
 }
+
+/**
+ * Get complete booking details for email receipt
+ * Joins all necessary tables to get movie, showtime, theater, seat information
+ */
+export async function getBookingDetailsForEmail(bookingId) {
+  try {
+    // First get basic booking details
+    const result = await query(
+      `SELECT 
+        b.booking_id,
+        b.total_amount,
+        b.seats as num_seats,
+        b.created_at as booking_timestamp,
+        b.status,
+        u.name as customer_name,
+        u.email as customer_email,
+        m.title as movie_title,
+        m.poster_url as movie_poster,
+        s.start_time as showtime,
+        t.name as theater_name,
+        t.location as theater_location,
+        a.name as auditorium_name
+      FROM booking b
+      JOIN public."user" u ON u.user_id = b.user_id
+      JOIN showtime s ON s.showtime_id = b.showtime_id
+      JOIN movie m ON m.movie_id = s.movie_id
+      JOIN auditorium a ON a.auditorium_id = s.auditorium_id
+      JOIN theater t ON t.theater_id = a.theater_id
+      WHERE b.booking_id = $1`,
+      [bookingId]
+    );
+    
+    if (!result.rows[0]) {
+      return null;
+    }
+    
+    const bookingDetails = result.rows[0];
+    
+    // Try to get seat numbers from booking_seat table
+    try {
+      const seatResult = await query(
+        `SELECT STRING_AGG(seat.row_label || seat.seat_number::text, ', ' ORDER BY seat.row_label, seat.seat_number) as seat_numbers
+         FROM booking_seat bs
+         JOIN seat ON seat.seat_id = bs.seat_id
+         WHERE bs.booking_id = $1`,
+        [bookingId]
+      );
+      
+      if (seatResult.rows[0]?.seat_numbers) {
+        bookingDetails.seat_numbers = seatResult.rows[0].seat_numbers;
+      } else {
+        bookingDetails.seat_numbers = null;
+      }
+    } catch (seatError) {
+      console.warn(`⚠️ Could not fetch seat numbers for booking ${bookingId}:`, seatError.message);
+      bookingDetails.seat_numbers = null;
+    }
+    
+    console.log('📧 Booking details for email:', {
+      bookingId: bookingDetails.booking_id,
+      seatNumbers: bookingDetails.seat_numbers,
+      numSeats: bookingDetails.num_seats
+    });
+    
+    return bookingDetails;
+  } catch (error) {
+    console.error(`❌ Error fetching booking details for email (booking ${bookingId}):`, error.message);
+    console.error('Full error:', error);
+    return null;
+  }
+}
+
+/**
+ * Update booking email sent status
+ */
+export async function updateBookingEmailStatus(bookingId, success, messageId = null, error = null) {
+  try {
+    if (success) {
+      await query(
+        `UPDATE booking 
+         SET email_sent = TRUE, 
+             email_sent_at = CURRENT_TIMESTAMP,
+             email_attempts = COALESCE(email_attempts, 0) + 1
+         WHERE booking_id = $1`,
+        [bookingId]
+      );
+    } else {
+      await query(
+        `UPDATE booking 
+         SET email_attempts = COALESCE(email_attempts, 0) + 1,
+             email_error = $2
+         WHERE booking_id = $1`,
+        [bookingId, error]
+      );
+    }
+  } catch (err) {
+    console.warn(`Warning: Could not update email status for booking ${bookingId}. Email tracking columns may not exist. Run migration: migrations/add_email_tracking.sql`);
+    console.warn(`Error details:`, err.message);
+  }
+}
+
+/**
+ * Log email send attempt for debugging and audit
+ */
+export async function logEmailAttempt(bookingId, recipientEmail, status, messageId = null, errorMessage = null, attemptNumber = 1) {
+  try {
+    await query(
+      `INSERT INTO email_log (booking_id, recipient_email, email_type, subject, status, message_id, error_message, attempt_number)
+       VALUES ($1, $2, 'booking_confirmation', 'Booking Confirmation', $3, $4, $5, $6)`,
+      [bookingId, recipientEmail, status, messageId, errorMessage, attemptNumber]
+    );
+  } catch (err) {
+    console.warn(`Warning: Could not log email attempt. email_log table may not exist. Run migration: migrations/add_email_tracking.sql`);
+    console.warn(`Error details:`, err.message);
+  }
+}
+

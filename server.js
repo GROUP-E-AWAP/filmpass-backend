@@ -4,14 +4,22 @@ import { pool } from "./config/db.js";
 import express from "express";
 import cors from "cors";
 import Stripe from "stripe";
+import { sendBookingConfirmationEmailWithRetry } from "./services/email.service.js";
+import { 
+  getBookingDetailsForEmail, 
+  updateBookingEmailStatus, 
+  logEmailAttempt 
+} from "./modules/bookings/bookings.repository.js";
 
 // Initialize Stripe with proper error handling
+let stripe = null;
 if (!process.env.STRIPE_SECRET_KEY) {
-  console.error("ERROR: STRIPE_SECRET_KEY not found in environment variables");
-  process.exit(1);
+  console.warn("WARNING: STRIPE_SECRET_KEY not found in environment variables");
+  console.warn("Payment features will be disabled. Add STRIPE_SECRET_KEY to enable payments.");
+} else {
+  stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+  console.log("Stripe initialized successfully");
 }
-
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 const app = createApp();
 
 /**
@@ -34,15 +42,15 @@ app.get("/db-health", async (req, res) => {
 });
 
 app.get("/", (req, res) => {
-  res.send("Welcome to the Movie Theater Booking API" );
+  res.send("Welcome to the Movie Theater Booking API");
 });
 
 /* Movies list */
 app.get("/movies", async (_req, res) => {
   try {
     const q = `
-      SELECT movie_id as id, title, description, duration_minutes, poster_url
-      FROM movie
+      SELECT id, title, description, duration_minutes, poster_url, price
+      FROM movies
       ORDER BY title
     `;
     const r = await pool.query(q);
@@ -57,22 +65,22 @@ app.get("/movies/:id", async (req, res) => {
   const id = req.params.id;
   try {
     const m = await pool.query(`
-      SELECT movie_id as id, title, description, duration_minutes, poster_url
-      FROM movie WHERE movie_id = $1
+      SELECT id, title, description, duration_minutes, poster_url, price
+      FROM movies WHERE id = $1
     `, [id]);
     if (m.rows.length === 0) return res.status(404).json({ error: "Not found" });
 
     const s = await pool.query(`
-      SELECT s.showtime_id as id,
+      SELECT s.id,
              s.start_time,
              s.end_time,
              s.price as price_adult,
              s.price as price_child,
              s.price,
-             a.auditorium_id,
+             a.id as auditorium_id,
              a.name AS theater_name
-      FROM showtime s
-      JOIN auditorium a ON a.auditorium_id = s.auditorium_id
+      FROM showtimes s
+      JOIN auditoriums a ON a.id = s.auditorium_id
       WHERE s.movie_id = $1
       ORDER BY s.start_time
     `, [id]);
@@ -86,24 +94,24 @@ app.get("/movies/:id", async (req, res) => {
 // Create a new movie
 app.post('/movies', async (req, res) => {
   try {
-    const { id, title, description, duration_minutes, poster_url, genre } = req.body;
+    const { id, title, description, duration_minutes, poster_url } = req.body;
 
     // Basic validation
-    if (!title || !duration_minutes) {
-      return res.status(400).json({ error: "Title and duration_minutes are required" });
+    if (!id || !title || !duration_minutes) {
+      return res.status(400).json({ error: "ID, title and duration_minutes are required" });
     }
 
     const result = await pool.query(
-      `INSERT INTO movie (title, description, duration_minutes, poster_url, genre) 
+      `INSERT INTO movies (id, title, description, duration_minutes, poster_url) 
        VALUES ($1, $2, $3, $4, $5) 
-       RETURNING movie_id as id, title, description, duration_minutes, poster_url, genre`,
-      [title, description, duration_minutes, poster_url, genre || 'Drama']
+       RETURNING id, title, description, duration_minutes, poster_url`,
+      [id, title, description, duration_minutes, poster_url]
     );
 
     res.status(201).json(result.rows[0]);
   } catch (err) {
     console.error("Error creating movie:", err);
-    res.status(500).json({ error: "Internal Server Error"});
+    res.status(500).json({ error: "Internal Server Error" });
   }
 });
 
@@ -111,11 +119,11 @@ app.post('/movies', async (req, res) => {
 app.delete('/movies/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    await pool.query('DELETE FROM movie WHERE movie_id = $1', [id]);
+    await pool.query('DELETE FROM movies WHERE id = $1', [id]);
     res.json({ message: "Movie deleted successfully" });
   } catch (err) {
     console.error("Error deleting movie:", err);
-    res.status(500).json({ error: "Internal Server Error"});
+    res.status(500).json({ error: "Internal Server Error" });
   }
 });
 
@@ -188,8 +196,85 @@ app.get("/showtimes/:id", async (req, res) => {
 
 /* Stripe Payment Integration */
 
+// Helper function to check if Stripe is configured
+const checkStripeConfigured = (res) => {
+  if (!stripe) {
+    res.status(503).json({
+      error: "Payment system not configured",
+      message: "Stripe payment integration is not available.",
+      code: "STRIPE_NOT_CONFIGURED"
+    });
+    return false;
+  }
+  return true;
+};
+
+/**
+ * Helper function to send booking confirmation email
+ * Handles email sending asynchronously with error handling
+ * Logs attempts and updates database tracking
+ */
+async function sendBookingEmailAsync(bookingId, recipientEmail) {
+  try {
+    // Get complete booking details for email
+    const bookingDetails = await getBookingDetailsForEmail(bookingId);
+    
+    if (!bookingDetails) {
+      console.error(`Cannot send email: Booking ${bookingId} not found`);
+      return;
+    }
+
+    // Prepare email data
+    const emailData = {
+      bookingId: bookingDetails.booking_id,
+      customerName: bookingDetails.customer_name,
+      movieTitle: bookingDetails.movie_title,
+      moviePoster: bookingDetails.movie_poster,
+      showtimeDate: bookingDetails.showtime,
+      showtimeTime: new Date(bookingDetails.showtime).toLocaleTimeString('en-US', { 
+        hour: '2-digit', 
+        minute: '2-digit',
+        hour12: true 
+      }),
+      theaterName: bookingDetails.theater_name,
+      theaterLocation: bookingDetails.theater_location,
+      auditoriumNumber: bookingDetails.auditorium_name, // Using auditorium name
+      seats: bookingDetails.seat_numbers || `${bookingDetails.num_seats} seat(s)`, // Display actual seat numbers
+      numberOfTickets: bookingDetails.num_seats,
+      totalAmount: bookingDetails.total_amount,
+      currency: 'EUR',
+      paymentMethod: 'Stripe',
+      bookingTimestamp: bookingDetails.booking_timestamp,
+    };
+
+    // Send email with retry logic
+    const result = await sendBookingConfirmationEmailWithRetry(emailData, recipientEmail);
+
+    // Update database tracking
+    if (result.success) {
+      await updateBookingEmailStatus(bookingId, true, result.messageId);
+      await logEmailAttempt(bookingId, recipientEmail, 'sent', result.messageId, null, 1);
+      console.log(`✓ Booking confirmation email sent for booking ${bookingId}`);
+    } else {
+      await updateBookingEmailStatus(bookingId, false, null, result.error);
+      await logEmailAttempt(bookingId, recipientEmail, 'failed', null, result.error, 1);
+      console.error(`✗ Failed to send email for booking ${bookingId}:`, result.error);
+    }
+  } catch (error) {
+    console.error(`Error in sendBookingEmailAsync for booking ${bookingId}:`, error);
+    try {
+      await logEmailAttempt(bookingId, recipientEmail, 'failed', null, error.message, 1);
+    } catch (logError) {
+      console.error('Failed to log email error:', logError);
+    }
+  }
+}
+
+
 // Create payment intent
 app.post("/create-payment-intent", async (req, res) => {
+  if (!checkStripeConfigured(res)) return;
+
   try {
     const { amount, currency = "usd", bookingDetails } = req.body;
 
@@ -224,6 +309,8 @@ app.post("/api/create-payment-intent", async (req, res) => {
 });
 
 app.post("/payment/create-intent", async (req, res) => {
+  if (!checkStripeConfigured(res)) return;
+
   try {
     const { amount, currency = "usd", bookingDetails } = req.body;
     if (!amount || amount <= 0) {
@@ -248,6 +335,8 @@ app.post("/payment/create-intent", async (req, res) => {
 // Create checkout session (for Stripe Checkout flow)
 // This endpoint returns a Payment Intent for embedded checkout UI
 app.post("/create-checkout-session", async (req, res) => {
+  if (!checkStripeConfigured(res)) return;
+
   try {
     console.log("Received checkout session request:", req.body);
     const { amount, currency = "eur", userEmail, showtimeId, seats, userName } = req.body;
@@ -264,10 +353,12 @@ app.post("/create-checkout-session", async (req, res) => {
       automatic_payment_methods: {
         enabled: true,
       },
+      receipt_email: userEmail || null, // Add customer email for receipts
       metadata: {
         showtimeId: showtimeId || '',
         seats: seats || '',
         userName: userName || '',
+        userEmail: userEmail || '', // Store email in metadata as backup
       },
       description: `Movie Ticket Booking - ${seats} ticket(s)`,
     });
@@ -288,10 +379,12 @@ app.post("/create-checkout-session", async (req, res) => {
 
 // Verify payment status
 app.get("/verify-payment", async (req, res) => {
+  if (!checkStripeConfigured(res)) return;
+
   try {
     let paymentIntentId = req.query.paymentIntentId;
     let sessionId = req.query.session_id;
-    
+
     // Handle if frontend passes paymentIntentId as session_id
     // Detect by checking if it starts with 'pi_' (PaymentIntent ID format)
     if (!paymentIntentId && sessionId && sessionId.startsWith('pi_')) {
@@ -299,7 +392,7 @@ app.get("/verify-payment", async (req, res) => {
       paymentIntentId = sessionId;
       sessionId = null;
     }
-    
+
     // Handle both session-based and payment intent-based verification
     if (paymentIntentId) {
       console.log("Verifying PaymentIntent:", paymentIntentId);
@@ -309,20 +402,24 @@ app.get("/verify-payment", async (req, res) => {
         paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
       } catch (stripeError) {
         console.error("Stripe PaymentIntent retrieval error:", stripeError.message);
-        return res.status(400).json({ 
-          success: false, 
+        return res.status(400).json({
+          success: false,
           error: `Invalid PaymentIntent ID: ${paymentIntentId}`,
           message: "Payment verification failed. Invalid payment reference."
         });
       }
-      
+
       if (paymentIntent.status === 'succeeded') {
         // Payment was successful - create booking in database
-        const userEmail = paymentIntent.receipt_email || 'guest@example.com';
+        const userEmail = paymentIntent.receipt_email || paymentIntent.metadata.userEmail || null;
+        
+        if (!userEmail) {
+          console.error('⚠️ No email found in payment intent. Cannot send confirmation email.');
+        }
         const userName = paymentIntent.metadata.userName || userEmail.split("@")[0];
         const showtimeId = paymentIntent.metadata.showtimeId;
         const seats = parseInt(paymentIntent.metadata.seats) || 1;
-        
+
         if (!showtimeId) {
           return res.status(400).json({
             success: false,
@@ -330,11 +427,11 @@ app.get("/verify-payment", async (req, res) => {
             message: "Cannot create booking: missing showtime details"
           });
         }
-        
+
         const client = await pool.connect();
         try {
           await client.query("BEGIN");
-          
+
           // Get or create user
           const uSel = await client.query(
             `SELECT user_id FROM public."user" WHERE email = $1 LIMIT 1`,
@@ -350,13 +447,13 @@ app.get("/verify-payment", async (req, res) => {
             );
             userId = ins.rows[0].user_id;
           }
-          
+
           // Check if booking already exists for this payment
           const existingBooking = await client.query(
             `SELECT booking_id FROM booking WHERE user_id = $1 AND showtime_id = $2 ORDER BY created_at DESC LIMIT 1`,
             [userId, showtimeId]
           );
-          
+
           let bookingId = null;
           if (existingBooking.rows.length > 0) {
             bookingId = existingBooking.rows[0].booking_id;
@@ -375,7 +472,7 @@ app.get("/verify-payment", async (req, res) => {
             );
             bookingId = bookingResult.rows[0].booking_id;
           }
-          
+
           // Get showtime details
           const showtimeQuery = await client.query(`
             SELECT s.showtime_id as id, s.movie_id, s.price, s.start_time, m.title, a.name as theater_name
@@ -384,11 +481,16 @@ app.get("/verify-payment", async (req, res) => {
             JOIN auditorium a ON a.auditorium_id = s.auditorium_id
             WHERE s.showtime_id = $1
           `, [showtimeId]);
-          
+
           await client.query("COMMIT");
-          
+
           const showtime = showtimeQuery.rows[0] || {};
           console.log("Payment verified successfully. Booking ID:", bookingId);
+          
+          // Send booking confirmation email asynchronously (don't wait for it)
+          // Email failures won't block the booking confirmation response
+          setImmediate(() => sendBookingEmailAsync(bookingId, userEmail));
+          
           return res.json({
             success: true,
             payment_status: paymentIntent.status,
@@ -416,7 +518,7 @@ app.get("/verify-payment", async (req, res) => {
           client.release();
         }
       }
-      
+
       return res.json({
         success: false,
         payment_status: paymentIntent.status,
@@ -424,10 +526,10 @@ app.get("/verify-payment", async (req, res) => {
         paymentIntentId: paymentIntentId,
       });
     }
-    
+
     // Original session-based verification
     if (!sessionId) {
-      return res.status(400).json({ 
+      return res.status(400).json({
         error: "Missing payment reference",
         message: "session_id or paymentIntentId is required",
         hint: "Pass paymentIntentId or session_id as query parameter"
@@ -446,7 +548,7 @@ app.get("/verify-payment", async (req, res) => {
         // Get or create user
         const userEmail = session.customer_email;
         const userName = session.metadata.userName || userEmail.split("@")[0];
-        
+
         const uSel = await client.query(`SELECT user_id FROM public."user" WHERE email = $1 LIMIT 1`, [userEmail]);
         let userId;
         if (uSel.rows.length) {
@@ -483,12 +585,17 @@ app.get("/verify-payment", async (req, res) => {
 
           await client.query("COMMIT");
 
+          const bookingId = bookingResult.rows[0].booking_id;
+          
+          // Send booking confirmation email asynchronously
+          setImmediate(() => sendBookingEmailAsync(bookingId, userEmail));
+
           // Return complete booking information
           return res.json({
             success: true,
             id: session.id,
             payment_status: session.payment_status,
-            bookingId: bookingResult.rows[0].booking_id,
+            bookingId: bookingId,
             movieTitle: showtime.title,
             showtime: showtime.start_time,
             theaterName: showtime.theater_name,
@@ -525,8 +632,105 @@ app.get("/verify-payment", async (req, res) => {
   }
 });
 
+/**
+ * Resend booking confirmation email
+ * POST /bookings/:id/resend-receipt
+ * Allows manual resend of confirmation email if original send failed
+ */
+app.post("/bookings/:id/resend-receipt", async (req, res) => {
+  try {
+    const bookingId = parseInt(req.params.id);
+    
+    if (!bookingId || isNaN(bookingId)) {
+      return res.status(400).json({
+        success: false,
+        error: "Invalid booking ID"
+      });
+    }
+
+    // Get booking details including email
+    const bookingDetails = await getBookingDetailsForEmail(bookingId);
+    
+    if (!bookingDetails) {
+      return res.status(404).json({
+        success: false,
+        error: "Booking not found"
+      });
+    }
+
+    const recipientEmail = bookingDetails.customer_email;
+    
+    // Check if booking is confirmed
+    if (bookingDetails.status !== 'confirmed') {
+      return res.status(400).json({
+        success: false,
+        error: "Cannot send receipt for non-confirmed booking",
+        status: bookingDetails.status
+      });
+    }
+
+    // Prepare email data
+    const emailData = {
+      bookingId: bookingDetails.booking_id,
+      customerName: bookingDetails.customer_name,
+      movieTitle: bookingDetails.movie_title,
+      moviePoster: bookingDetails.movie_poster,
+      showtimeDate: bookingDetails.showtime,
+      showtimeTime: new Date(bookingDetails.showtime).toLocaleTimeString('en-US', { 
+        hour: '2-digit', 
+        minute: '2-digit',
+        hour12: true 
+      }),
+      theaterName: bookingDetails.theater_name,
+      theaterLocation: bookingDetails.theater_location,
+      auditoriumNumber: bookingDetails.auditorium_name, // Using auditorium name
+      seats: bookingDetails.seat_numbers || `${bookingDetails.num_seats} seat(s)`, // Display actual seat numbers
+      numberOfTickets: bookingDetails.num_seats,
+      totalAmount: bookingDetails.total_amount,
+      currency: 'EUR',
+      paymentMethod: 'Stripe',
+      bookingTimestamp: bookingDetails.booking_timestamp,
+    };
+
+    // Send email with retry
+    const result = await sendBookingConfirmationEmailWithRetry(emailData, recipientEmail);
+
+    // Update database tracking
+    if (result.success) {
+      await updateBookingEmailStatus(bookingId, true, result.messageId);
+      await logEmailAttempt(bookingId, recipientEmail, 'sent', result.messageId, null, 1);
+      
+      return res.json({
+        success: true,
+        message: "Booking confirmation email resent successfully",
+        bookingId: bookingId,
+        recipient: recipientEmail,
+        messageId: result.messageId
+      });
+    } else {
+      await updateBookingEmailStatus(bookingId, false, null, result.error);
+      await logEmailAttempt(bookingId, recipientEmail, 'failed', null, result.error, 1);
+      
+      return res.status(500).json({
+        success: false,
+        error: "Failed to send email",
+        message: result.error,
+        bookingId: bookingId
+      });
+    }
+  } catch (error) {
+    console.error("Error in resend-receipt endpoint:", error);
+    res.status(500).json({
+      success: false,
+      error: error.message || "Internal server error"
+    });
+  }
+});
+
 // Legacy payment status endpoint (kept for backward compatibility)
 app.get("/payment-status/:paymentIntentId", async (req, res) => {
+  if (!checkStripeConfigured(res)) return;
+
   try {
     const paymentIntent = await stripe.paymentIntents.retrieve(
       req.params.paymentIntentId
@@ -545,6 +749,8 @@ app.get("/payment-status/:paymentIntentId", async (req, res) => {
 
 // Webhook endpoint for Stripe events (optional but recommended)
 app.post("/webhook", express.raw({ type: "application/json" }), async (req, res) => {
+  if (!checkStripeConfigured(res)) return;
+
   // Skip webhook verification if webhook secret is not configured
   if (!process.env.STRIPE_WEBHOOK_SECRET) {
     console.log("Webhook received but STRIPE_WEBHOOK_SECRET not configured, skipping verification");
@@ -586,7 +792,8 @@ app.post("/webhook", express.raw({ type: "application/json" }), async (req, res)
 // Get Stripe publishable key (for frontend)
 app.get("/config", (req, res) => {
   res.json({
-    publishableKey: process.env.STRIPE_PUBLISHABLE_KEY,
+    publishableKey: process.env.STRIPE_PUBLISHABLE_KEY || null,
+    stripeEnabled: !!stripe,
   });
 });
 
@@ -594,16 +801,16 @@ app.get("/config", (req, res) => {
 app.post("/confirm-payment", async (req, res) => {
   try {
     const { paymentIntentId, sessionId } = req.body;
-    
+
     if (!paymentIntentId && !sessionId) {
       return res.status(400).json({ error: "paymentIntentId or sessionId is required" });
     }
-    
+
     // Forward to verify-payment endpoint logic
-    const queryParams = paymentIntentId 
-      ? `?paymentIntentId=${paymentIntentId}` 
+    const queryParams = paymentIntentId
+      ? `?paymentIntentId=${paymentIntentId}`
       : `?session_id=${sessionId}`;
-    
+
     // Construct a mock request to reuse verify-payment logic
     res.redirect(`/verify-payment${queryParams}`);
   } catch (error) {
@@ -614,39 +821,41 @@ app.post("/confirm-payment", async (req, res) => {
 
 // Direct PaymentIntent confirmation endpoint
 app.post("/confirm-payment-intent", async (req, res) => {
+  if (!checkStripeConfigured(res)) return;
+
   try {
     const { paymentIntentId } = req.body;
-    
+
     if (!paymentIntentId) {
-      return res.status(400).json({ 
+      return res.status(400).json({
         success: false,
         error: "paymentIntentId is required",
         message: "Please provide a valid PaymentIntent ID"
       });
     }
-    
+
     console.log("Confirming PaymentIntent (POST):", paymentIntentId);
-    
+
     // Verify PaymentIntent status
     let paymentIntent;
     try {
       paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
     } catch (stripeError) {
       console.error("Stripe error:", stripeError.message);
-      return res.status(400).json({ 
-        success: false, 
+      return res.status(400).json({
+        success: false,
         error: `Invalid PaymentIntent ID: ${paymentIntentId}`,
         message: "Payment reference not found"
       });
     }
-    
+
     if (paymentIntent.status === 'succeeded') {
       // Payment was successful - create booking in database
-      const userEmail = paymentIntent.receipt_email || 'guest@example.com';
-      const userName = paymentIntent.metadata.userName || userEmail.split("@")[0];
+      const userEmail = paymentIntent.receipt_email || paymentIntent.metadata.userEmail || null;
+      const userName = paymentIntent.metadata.userName || (userEmail ? userEmail.split("@")[0] : 'Guest');
       const showtimeId = paymentIntent.metadata.showtimeId;
       const seats = parseInt(paymentIntent.metadata.seats) || 1;
-      
+
       if (!showtimeId) {
         return res.status(400).json({
           success: false,
@@ -654,11 +863,11 @@ app.post("/confirm-payment-intent", async (req, res) => {
           message: "Cannot create booking: missing showtime details"
         });
       }
-      
+
       const client = await pool.connect();
       try {
         await client.query("BEGIN");
-        
+
         // Get or create user
         const uSel = await client.query(
           `SELECT user_id FROM public."user" WHERE email = $1 LIMIT 1`,
@@ -674,13 +883,13 @@ app.post("/confirm-payment-intent", async (req, res) => {
           );
           userId = ins.rows[0].user_id;
         }
-        
+
         // Check if booking already exists
         const existingBooking = await client.query(
           `SELECT booking_id FROM booking WHERE user_id = $1 AND showtime_id = $2 ORDER BY created_at DESC LIMIT 1`,
           [userId, showtimeId]
         );
-        
+
         let bookingId = null;
         if (existingBooking.rows.length > 0) {
           bookingId = existingBooking.rows[0].booking_id;
@@ -697,7 +906,7 @@ app.post("/confirm-payment-intent", async (req, res) => {
           );
           bookingId = bookingResult.rows[0].booking_id;
         }
-        
+
         // Get showtime details
         const showtimeQuery = await client.query(`
           SELECT s.showtime_id as id, s.movie_id, s.price, s.start_time, m.title, a.name as theater_name
@@ -706,12 +915,12 @@ app.post("/confirm-payment-intent", async (req, res) => {
           JOIN auditorium a ON a.auditorium_id = s.auditorium_id
           WHERE s.showtime_id = $1
         `, [showtimeId]);
-        
+
         await client.query("COMMIT");
-        
+
         const showtime = showtimeQuery.rows[0] || {};
         console.log("PaymentIntent confirmed. Booking ID:", bookingId);
-        
+
         return res.json({
           success: true,
           payment_status: paymentIntent.status,
@@ -738,7 +947,7 @@ app.post("/confirm-payment-intent", async (req, res) => {
         client.release();
       }
     }
-    
+
     // Payment not successful
     return res.json({
       success: false,
@@ -748,7 +957,7 @@ app.post("/confirm-payment-intent", async (req, res) => {
     });
   } catch (error) {
     console.error("PaymentIntent confirmation error:", error);
-    res.status(500).json({ 
+    res.status(500).json({
       success: false,
       error: error.message,
       message: "An error occurred while confirming payment"
@@ -759,7 +968,7 @@ app.post("/confirm-payment-intent", async (req, res) => {
 // Catch-all for debugging 404s
 app.use((req, res, next) => {
   console.log(`404 - ${req.method} ${req.url}`);
-  res.status(404).json({ 
+  res.status(404).json({
     error: "Not Found",
     message: `Route ${req.method} ${req.url} does not exist`,
     availableEndpoints: {
@@ -788,7 +997,7 @@ process.on('unhandledRejection', (reason, promise) => {
 app.listen(PORT, () => {
   console.log(`API listening on http://localhost:${PORT}`);
   console.log("JWT secret loaded:", process.env.JWT_SECRET ? "OK" : "MISSING");
-  console.log("Stripe key loaded:", process.env.STRIPE_SECRET_KEY ? "OK" : "MISSING");
+  console.log("Stripe payment features:", stripe ? "ENABLED" : "DISABLED (no STRIPE_SECRET_KEY)");
 
   // Simple database connectivity test
   pool
