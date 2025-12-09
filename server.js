@@ -13,6 +13,7 @@ import {
 
 // Initialize Stripe with proper error handling
 let stripe = null;
+
 if (!process.env.STRIPE_SECRET_KEY) {
   console.warn("WARNING: STRIPE_SECRET_KEY not found in environment variables");
   console.warn("Payment features will be disabled. Add STRIPE_SECRET_KEY to enable payments.");
@@ -20,6 +21,7 @@ if (!process.env.STRIPE_SECRET_KEY) {
   stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
   console.log("Stripe initialized successfully");
 }
+
 const app = createApp();
 
 /**
