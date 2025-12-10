@@ -5,6 +5,7 @@ import {
   adminCreateShowtime,
   adminCreateTheater,
   adminCreateUser,
+  adminDeleteMovie,
   adminFindUserByEmail,
   adminGenerateSeatsForAuditorium,
   adminLinkEmployeeToTheater,
@@ -125,4 +126,11 @@ export async function adminListEmployeesService() {
  */
 export async function adminListBookingsService(filters) {
   return adminListBookings(filters);
+}
+
+/**
+ * Service: delete a movie.
+ */
+export async function adminDeleteMovieService(movieId) {
+  return adminDeleteMovie(movieId);
 }

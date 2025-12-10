@@ -4,6 +4,7 @@ import {
   adminCreateMovieService,
   adminCreateShowtimeService,
   adminCreateTheaterService,
+  adminDeleteMovieService,
   adminListAuditoriumsService,
   adminListBookingsService,
   adminListEmployeesService,
@@ -154,6 +155,28 @@ export async function adminListBookingsController(req, res, next) {
 
     const bookings = await adminListBookingsService(filters);
     res.json(bookings);
+  } catch (e) {
+    next(e);
+  }
+}
+
+/**
+ * DELETE /admin/movies/:movieId
+ * Deletes a movie by ID.
+ */
+export async function adminDeleteMovieController(req, res, next) {
+  try {
+    const movieId = Number(req.params.movieId);
+    if (Number.isNaN(movieId)) {
+      return res.status(400).json({ error: "Invalid movie ID" });
+    }
+
+    const deleted = await adminDeleteMovieService(movieId);
+    if (!deleted) {
+      return res.status(404).json({ error: "Movie not found" });
+    }
+
+    res.json({ message: "Movie deleted successfully", movie: deleted });
   } catch (e) {
     next(e);
   }

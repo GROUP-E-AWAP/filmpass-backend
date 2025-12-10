@@ -13,6 +13,7 @@ import {
   adminCreateMovieController,
   adminCreateShowtimeController,
   adminCreateTheaterController,
+  adminDeleteMovieController,
   adminListAuditoriumsController,
   adminListBookingsController,
   adminListEmployeesController,
@@ -45,6 +46,7 @@ router.post("/auditoriums", validate(createAuditoriumSchema), adminCreateAuditor
  */
 router.get("/movies", adminListMoviesController);
 router.post("/movies", validate(createMovieSchema), adminCreateMovieController);
+router.delete("/movies/:movieId", adminDeleteMovieController);
 
 /**
  * Creating showtimes (movie screenings).
