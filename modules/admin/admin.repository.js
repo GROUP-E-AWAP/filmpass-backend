@@ -288,3 +288,16 @@ export async function adminListBookings({ theaterId, fromDate, toDate }) {
 
   return result.rows;
 }
+
+/**
+ * Delete a movie by its ID.
+ */
+export async function adminDeleteMovie(movieId) {
+  const result = await query(
+    `DELETE FROM movie
+     WHERE movie_id = $1
+     RETURNING movie_id`,
+    [movieId]
+  );
+  return result.rows[0];
+}
